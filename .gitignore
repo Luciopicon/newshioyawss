@@ -1,0 +1,14 @@
+node_modules/
+.vercel/
+.env*
+public/
+
+
+.vercel
+.env*.local
+.vercel-token.dpapi
+.vercel-scope.txt
+.xhttprelay-project-state.json
+build-profile-*.txt
+env-report-*.txt
+billing-usage-*.txt
