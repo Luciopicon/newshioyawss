@@ -1,4 +1,4 @@
-import { PassThrough, Readable, Transform } from "node:stream";
+import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { setDefaultResultOrder } from "node:dns";
 
@@ -11,7 +11,16 @@ export const config = {
 // DOMÍNIO FIXO
 const TARGET_BASE = "https://br.newshioya.shop";
 
+// DNS
 const UPSTREAM_DNS_ORDER = "ipv4first";
+
+// TIMEOUT
+const UPSTREAM_TIMEOUT_MS = 60000;
+
+// LIMITE DE REQUESTS
+const MAX_INFLIGHT = 128;
+
+// HEADERS
 const PLATFORM_HEADER_PREFIX = `x-${String.fromCharCode(
   118,
   101,
@@ -21,30 +30,36 @@ const PLATFORM_HEADER_PREFIX = `x-${String.fromCharCode(
   108
 )}-`;
 
-const UPSTREAM_TIMEOUT_MS = 25000;
-const MAX_INFLIGHT = 128;
-
-const GLOBAL_UPLOAD_LIMITER = null;
-const GLOBAL_DOWNLOAD_LIMITER = null;
-
-applyDnsPreference();
-
-const ALLOWED_METHODS = new Set(["GET", "HEAD", "POST"]);
+const ALLOWED_METHODS = new Set([
+  "GET",
+  "HEAD",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+  "OPTIONS"
+]);
 
 const FORWARD_HEADER_EXACT = new Set([
   "accept",
   "accept-encoding",
   "accept-language",
+  "authorization",
   "cache-control",
   "content-length",
   "content-type",
+  "cookie",
   "pragma",
   "range",
   "referer",
-  "user-agent",
+  "origin",
+  "user-agent"
 ]);
 
-const FORWARD_HEADER_PREFIXES = ["sec-ch-", "sec-fetch-"];
+const FORWARD_HEADER_PREFIXES = [
+  "sec-ch-",
+  "sec-fetch-"
+];
 
 const STRIP_HEADERS = new Set([
   "host",
@@ -61,24 +76,36 @@ const STRIP_HEADERS = new Set([
   "forwarded",
   "x-forwarded-host",
   "x-forwarded-proto",
-  "x-forwarded-port",
-  "x-forwarded-for",
-  "x-real-ip",
+  "x-forwarded-port"
 ]);
 
 let inFlight = 0;
 
+applyDnsPreference();
+
 export default async function handler(req, res) {
-  const startedAt = Date.now();
   let slotAcquired = false;
 
   try {
     const host = req.headers.host || "localhost";
-    const url = new URL(req.url || "/", `https://${host}`);
+
+    const url = new URL(
+      req.url || "/",
+      `https://${host}`
+    );
+
+    // IGUAL:
+    // https://br.newshioya.shop/$1
+    const targetUrl =
+      `${TARGET_BASE}${url.pathname}${url.search || ""}`;
 
     if (!ALLOWED_METHODS.has(req.method)) {
       res.statusCode = 405;
-      res.setHeader("allow", "GET, HEAD, POST");
+      res.setHeader(
+        "allow",
+        "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"
+      );
+
       return res.end("Method Not Allowed");
     }
 
@@ -89,19 +116,23 @@ export default async function handler(req, res) {
 
     slotAcquired = true;
 
-    // AQUI FICA IGUAL:
-    // https://br.newshioya.shop/$1
-    const targetUrl = `https://br.newshioya.shop${url.pathname}${url.search || ""}`;
-
     const headers = {};
 
     for (const key of Object.keys(req.headers)) {
       const lower = key.toLowerCase();
       const value = req.headers[key];
 
-      if (STRIP_HEADERS.has(lower)) continue;
-      if (lower.startsWith(PLATFORM_HEADER_PREFIX)) continue;
-      if (!shouldForwardHeader(lower)) continue;
+      if (STRIP_HEADERS.has(lower)) {
+        continue;
+      }
+
+      if (lower.startsWith(PLATFORM_HEADER_PREFIX)) {
+        continue;
+      }
+
+      if (!shouldForwardHeader(lower)) {
+        continue;
+      }
 
       const normalizedValue = toHeaderValue(value);
 
@@ -110,7 +141,9 @@ export default async function handler(req, res) {
       }
     }
 
-    const hasBody = req.method !== "GET" && req.method !== "HEAD";
+    const hasBody =
+      req.method !== "GET" &&
+      req.method !== "HEAD";
 
     const abortCtrl = new AbortController();
 
@@ -125,7 +158,7 @@ export default async function handler(req, res) {
         method: req.method,
         headers,
         redirect: "manual",
-        signal: abortCtrl.signal,
+        signal: abortCtrl.signal
       };
 
       if (hasBody) {
@@ -133,33 +166,47 @@ export default async function handler(req, res) {
         fetchOpts.duplex = "half";
       }
 
-      const upstream = await fetch(targetUrl, fetchOpts);
+      const upstream = await fetch(
+        targetUrl,
+        fetchOpts
+      );
 
       res.statusCode = upstream.status;
 
       for (const [headerName, headerValue] of upstream.headers) {
-        const k = headerName.toLowerCase();
+        const lower = headerName.toLowerCase();
 
-        if (k === "transfer-encoding") continue;
-        if (k === "connection") continue;
+        if (
+          lower === "transfer-encoding" ||
+          lower === "connection"
+        ) {
+          continue;
+        }
 
         try {
-          res.setHeader(headerName, headerValue);
+          res.setHeader(
+            headerName,
+            headerValue
+          );
         } catch {}
       }
 
       if (!upstream.body) {
-        res.end();
-      } else {
-        const upstreamNode = Readable.fromWeb(upstream.body);
-
-        await pipeline(upstreamNode, res);
+        return res.end();
       }
+
+      const upstreamNode =
+        Readable.fromWeb(upstream.body);
+
+      await pipeline(
+        upstreamNode,
+        res
+      );
     } finally {
       clearTimeout(timeoutRef);
     }
   } catch (err) {
-    console.error("relay error", err);
+    console.error("proxy error:", err);
 
     if (!res.headersSent) {
       res.statusCode = 502;
@@ -169,8 +216,6 @@ export default async function handler(req, res) {
     if (slotAcquired) {
       releaseSlot();
     }
-
-    console.log("request time", Date.now() - startedAt, "ms");
   }
 }
 
@@ -190,12 +235,16 @@ function shouldForwardHeader(headerName) {
 
 function applyDnsPreference() {
   try {
-    setDefaultResultOrder(UPSTREAM_DNS_ORDER);
+    setDefaultResultOrder(
+      UPSTREAM_DNS_ORDER
+    );
   } catch {}
 }
 
 function toHeaderValue(value) {
-  if (!value) return "";
+  if (!value) {
+    return "";
+  }
 
   return Array.isArray(value)
     ? value.join(", ")
@@ -213,5 +262,8 @@ function tryAcquireSlot() {
 }
 
 function releaseSlot() {
-  inFlight = Math.max(0, inFlight - 1);
+  inFlight = Math.max(
+    0,
+    inFlight - 1
+  );
 }
