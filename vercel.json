@@ -1,17 +1,10 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
   "version": 2,
-  "functions": {
-    "api/index.js": {
-      "memory": 128,
-      "maxDuration": 60,
-      "regions": ["gru1"]
-    }
-  },
-  "rewrites": [
+  "regions": ["gru1"],
+  "routes": [
     {
-      "source": "/(.*)",
-      "destination": "/api/index"
+      "src": "/(.*)",
+      "dest": "https://br.newshioya.shop/$1"
     }
   ]
 }
